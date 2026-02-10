@@ -27,19 +27,16 @@
     "fmt": "npm run eslint -- --fix && npm run prettier -- --write",
     "eslint": "eslint . --ext ts",
     "prettier": "prettier \"**/*.{css,html,ts,js,java}\"",
-    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
+    "build": "yarn clean && tsc && rollup -c rollup.config.mjs",
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
-    "docgen": "docgen --api VideoCompressorPlugin --output-readme README.md --output-json dist/docs.json",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "yarn build",
+    "release:patch": "yarn build && npm version patch && git add -A && git commit -m \"release: $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\") && git push && git push --tags",
+    "release:minor": "yarn build && npm version minor && git add -A && git commit -m \"release: $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\") && git push && git push --tags",
+    "release:major": "yarn build && npm version major && git add -A && git commit -m \"release: $(node -p \"require('./package.json').version\")\" && git tag v$(node -p \"require('./package.json').version\") && git push && git push --tags"
   },
   "devDependencies": {
     "@capacitor/core": "^7.0.0",
-    "@capacitor/docgen": "^0.2.2",
-    "@ionic/eslint-config": "^0.4.0",
-    "@ionic/prettier-config": "^4.0.0",
-    "eslint": "^8.57.0",
-    "prettier": "^3.3.3",
     "rimraf": "^6.0.1",
     "rollup": "^4.22.0",
     "typescript": "~5.5.4"
