@@ -9,7 +9,7 @@ Native video compression plugin for Capacitor v7. Compresses videos before uploa
 ## Install
 
 ```bash
-yarn add @doinn/capacitor-video-compressor@https://github.com/Doinn/capacitor-video-compressor.git#v1.0.0
+yarn add "@doinn/capacitor-video-compressor@https://github.com/Doinn/capacitor-video-compressor.git#v1.0.0"
 
 npx cap sync
 ```
