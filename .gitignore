@@ -1,0 +1,22 @@
+dist/
+node_modules/
+
+# iOS
+ios/Pods/
+ios/.build/
+ios/Plugin.xcworkspace/xcshareddata/
+ios/Plugin.xcworkspace/xcuserdata/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# Editor
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.DS_Store
