@@ -450,15 +450,10 @@ class VideoCompressor(private val context: Context) {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
         }
 
-        val encoder = MediaCodec.createEncoderByType(MIME_AAC)
-        encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        encoder.start()
-
-        // Configure decoder
-        val decoderMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
-        val decoder = MediaCodec.createDecoderByType(decoderMime)
-        decoder.configure(inputFormat, null, null, 0)
-        decoder.start()
+        // Created inside the try so a failed decoder setup still releases the
+        // already-started encoder.
+        var encoderRef: MediaCodec? = null
+        var decoderRef: MediaCodec? = null
 
         var muxerTrack = -1
         val bufferInfo = MediaCodec.BufferInfo()
@@ -470,6 +465,16 @@ class VideoCompressor(private val context: Context) {
         var lastAudioTimestampUs = -1L
 
         try {
+            val encoder = MediaCodec.createEncoderByType(MIME_AAC).also { encoderRef = it }
+            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoder.start()
+
+            // Configure decoder
+            val decoderMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
+            val decoder = MediaCodec.createDecoderByType(decoderMime).also { decoderRef = it }
+            decoder.configure(inputFormat, null, null, 0)
+            decoder.start()
+
             while (!encoderDone) {
                 if (isCancelled) throw CancelledException()
 
@@ -586,10 +591,10 @@ class VideoCompressor(private val context: Context) {
                 }
             }
         } finally {
-            tryQuietly { decoder.stop() }
-            tryQuietly { decoder.release() }
-            tryQuietly { encoder.stop() }
-            tryQuietly { encoder.release() }
+            tryQuietly { decoderRef?.stop() }
+            tryQuietly { decoderRef?.release() }
+            tryQuietly { encoderRef?.stop() }
+            tryQuietly { encoderRef?.release() }
         }
 
         onProgress?.invoke(1.0f)
