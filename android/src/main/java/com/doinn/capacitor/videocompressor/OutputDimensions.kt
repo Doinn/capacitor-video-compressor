@@ -14,7 +14,8 @@ internal object OutputDimensions {
      * orientation. The SurfaceTexture transform matrix handles rotation during
      * GLES rendering.
      *
-     * Always rounds to multiples of 16 for hardware encoder compatibility.
+     * Always rounds to multiples of 16 for hardware encoder compatibility,
+     * without exceeding the bounds.
      */
     fun calculate(
         inputWidth: Int,
@@ -38,14 +39,20 @@ internal object OutputDimensions {
         }
 
         if (displayW <= boundW && displayH <= boundH) {
-            return Pair(roundTo16(displayW), roundTo16(displayH))
+            return Pair(alignWithin(displayW, boundW), alignWithin(displayH, boundH))
         }
 
         val widthRatio = boundW.toFloat() / displayW
         val heightRatio = boundH.toFloat() / displayH
         val scale = minOf(widthRatio, heightRatio)
 
-        return Pair(roundTo16((displayW * scale).toInt()), roundTo16((displayH * scale).toInt()))
+        return Pair(alignWithin((displayW * scale).toInt(), boundW), alignWithin((displayH * scale).toInt(), boundH))
+    }
+
+    /** Rounds to a multiple of 16, stepping down when rounding up would exceed [bound]. */
+    private fun alignWithin(value: Int, bound: Int): Int {
+        val rounded = roundTo16(value)
+        return if (rounded > bound && rounded - 16 >= 16) rounded - 16 else rounded
     }
 
     /**

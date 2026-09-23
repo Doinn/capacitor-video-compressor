@@ -50,6 +50,12 @@ class OutputDimensionsTest {
     }
 
     @Test
+    fun neverRoundsAboveTheBounds() {
+        assertEquals(Pair(1072, 1920), OutputDimensions.calculate(1080, 1920, 0, 1920, 1080))
+        assertEquals(Pair(1920, 1072), OutputDimensions.calculate(1920, 1080, 0, 1920, 1080))
+    }
+
+    @Test
     fun roundsToMultiplesOf16WithMinimum16() {
         assertEquals(848, OutputDimensions.roundTo16(853))
         assertEquals(16, OutputDimensions.roundTo16(3))
