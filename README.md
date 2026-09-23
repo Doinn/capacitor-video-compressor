@@ -53,8 +53,8 @@ await listener.remove();
 |-------|------|---------|-------------|
 | `filePath` | `string` | *required* | Path to source video (`file://`, `content://`, or absolute path) |
 | `quality` | `'low' \| 'medium' \| 'high'` | `'medium'` | Quality preset |
-| `maxWidth` | `number` | from preset | Override max output width |
-| `maxHeight` | `number` | from preset | Override max output height |
+| `maxWidth` | `number` | from preset | Override max output width for landscape video (on Android the larger bound limits the long edge, so portrait video is bounded the same way) |
+| `maxHeight` | `number` | from preset | Override max output height for landscape video |
 | `videoBitrate` | `number` | from preset | Override video bitrate (bps) |
 | `audioBitrate` | `number` | from preset | Override audio bitrate (bps) |
 | `deleteOriginal` | `boolean` | `false` | Delete source file after compression |

@@ -14,13 +14,16 @@ export interface CompressVideoOptions {
   quality?: 'low' | 'medium' | 'high';
 
   /**
-   * Override maximum output width (pixels).
+   * Override maximum output width (pixels) for landscape video.
+   * On Android the bounds follow the video's orientation: the larger of
+   * `maxWidth`/`maxHeight` limits the long edge and the smaller one the short edge.
    * If not specified, uses the quality preset's default.
    */
   maxWidth?: number;
 
   /**
-   * Override maximum output height (pixels).
+   * Override maximum output height (pixels) for landscape video.
+   * See `maxWidth` for how portrait video is bounded.
    * If not specified, uses the quality preset's default.
    */
   maxHeight?: number;
