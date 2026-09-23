@@ -39,6 +39,16 @@ class CompressedCacheCleanerTest {
     }
 
     @Test
+    fun keepsFilesExactlyAtMaxAge() {
+        val boundary = cacheFile("compressed_5.mp4", CompressedCacheCleaner.MAX_AGE_MS)
+
+        val deleted = CompressedCacheCleaner.purgeStale(tempFolder.root, now)
+
+        assertEquals(0, deleted)
+        assertTrue(boundary.exists())
+    }
+
+    @Test
     fun ignoresFilesThatAreNotCompressorOutput() {
         val otherMp4 = cacheFile("video.mp4", CompressedCacheCleaner.MAX_AGE_MS + 1)
         val otherPrefix = cacheFile("compressed_3.tmp", CompressedCacheCleaner.MAX_AGE_MS + 1)

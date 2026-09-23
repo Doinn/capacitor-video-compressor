@@ -50,6 +50,18 @@ class DecoderMimeTest {
     }
 
     @Test
+    fun rejectsDolbyVisionDualLayerProfile() {
+        assertNull(
+            DecoderMime.resolve(MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION, CodecProfileLevel.DolbyVisionProfileDvheDtb)
+        )
+    }
+
+    @Test
+    fun decodesProfileValueReportedByExtractorForIphoneHdrAsHevc() {
+        assertEquals(MediaFormat.MIMETYPE_VIDEO_HEVC, DecoderMime.resolve(MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION, 256))
+    }
+
+    @Test
     fun rejectsDolbyVisionWithUnknownProfile() {
         assertNull(DecoderMime.resolve(MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION, null))
     }

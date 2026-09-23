@@ -28,6 +28,17 @@ class OutputDimensionsTest {
     }
 
     @Test
+    fun treatsUpsideDownVideoAsUnrotated() {
+        assertEquals(Pair(848, 480), OutputDimensions.calculate(1920, 1080, 180, 854, 480))
+    }
+
+    @Test
+    fun treatsPortraitBoundsLikeLandscapeBounds() {
+        assertEquals(Pair(480, 848), OutputDimensions.calculate(1920, 1080, 90, 480, 854))
+        assertEquals(Pair(848, 480), OutputDimensions.calculate(1920, 1080, 0, 480, 854))
+    }
+
+    @Test
     fun scalesSquareVideoByTheShortBound() {
         assertEquals(Pair(480, 480), OutputDimensions.calculate(1080, 1080, 0, 854, 480))
     }
