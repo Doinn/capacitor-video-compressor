@@ -15,7 +15,7 @@ internal object OutputDimensions {
      * GLES rendering.
      *
      * Always rounds to multiples of 16 for hardware encoder compatibility,
-     * without exceeding the bounds.
+     * without exceeding the bounds (bounds below 16 still yield 16).
      */
     fun calculate(
         inputWidth: Int,
