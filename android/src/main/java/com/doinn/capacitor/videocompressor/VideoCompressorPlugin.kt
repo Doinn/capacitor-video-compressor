@@ -28,6 +28,18 @@ class VideoCompressorPlugin : Plugin() {
     override fun load() {
         compressor = VideoCompressor(context)
         Log.d(TAG, "VideoCompressorPlugin loaded")
+        purgeStaleCompressedFiles()
+    }
+
+    private fun purgeStaleCompressedFiles() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val deleted = CompressedCacheCleaner.purgeStale(context.cacheDir, System.currentTimeMillis())
+                if (deleted > 0) Log.d(TAG, "Deleted $deleted stale compressed file(s)")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to purge stale compressed files", e)
+            }
+        }
     }
 
     @PluginMethod

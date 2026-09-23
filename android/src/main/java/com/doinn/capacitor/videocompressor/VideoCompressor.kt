@@ -59,7 +59,10 @@ class VideoCompressor(private val context: Context) {
 
             val inputFile = resolveInputFile(inputPath)
             val originalSize = getFileSize(inputPath)
-            val outputFile = File(context.cacheDir, "compressed_${System.currentTimeMillis()}.mp4")
+            val outputFile = File(
+                context.cacheDir,
+                "${CompressedCacheCleaner.FILE_PREFIX}${System.currentTimeMillis()}${CompressedCacheCleaner.FILE_SUFFIX}"
+            )
 
             Log.d(TAG, "Starting compression: $inputPath -> ${outputFile.absolutePath}")
             Log.d(TAG, "Options: ${options.maxWidth}x${options.maxHeight}, video=${options.videoBitrate}bps, audio=${options.audioBitrate}bps")
