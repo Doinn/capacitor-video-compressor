@@ -1,6 +1,6 @@
 {
   "name": "@doinn/capacitor-video-compressor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Native video compression for Capacitor using AVAssetExportSession (iOS) and MediaCodec Surface-to-Surface pipeline (Android)",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
