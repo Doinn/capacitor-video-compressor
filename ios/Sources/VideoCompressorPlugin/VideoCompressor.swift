@@ -131,14 +131,6 @@ class VideoCompressor {
             print("\(logPrefix) Trimming video to \(String(format: "%.1f", maxDuration))s (original: \(String(format: "%.1f", CMTimeGetSeconds(duration)))s)")
         }
 
-        // Use fileLengthLimit to constrain output bitrate
-        if durationSec > 0 {
-            let targetBytes = Int64(durationSec * Double(options.videoBitrate + options.audioBitrate) / 8.0)
-            // Add 10% headroom for container overhead
-            session.fileLengthLimit = Int64(Double(targetBytes) * 1.1)
-            print("\(logPrefix) File length limit set to \(session.fileLengthLimit) bytes for \(String(format: "%.1f", durationSec))s video")
-        }
-
         exportSession = session
         startProgressPolling(session: session)
 
@@ -166,6 +158,17 @@ class VideoCompressor {
             throw CompressionError.compressionFailed(errorMsg)
         }
 
+        // The export reports .completed even when it stops early, so compare the
+        // output length with the requested one and fail rather than upload a cut video.
+        let outputDurationSec = CMTimeGetSeconds(try await loadDuration(asset: AVURLAsset(url: outputURL)))
+        let tolerance = max(0.5, durationSec * 0.02)
+        if outputDurationSec < durationSec - tolerance {
+            try? FileManager.default.removeItem(at: outputURL)
+            let errorMsg = "Output truncated: \(String(format: "%.1f", outputDurationSec))s of \(String(format: "%.1f", durationSec))s"
+            print("\(logPrefix) \(errorMsg)")
+            throw CompressionError.compressionFailed(errorMsg)
+        }
+
         // Read compressed file attributes
         let compressedAttributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
         let compressedSize = compressedAttributes[.size] as? Int64 ?? 0
@@ -188,7 +191,7 @@ class VideoCompressor {
             compressedPath: outputURL.path,
             originalSize: originalSize,
             compressedSize: compressedSize,
-            duration: durationSec,
+            duration: outputDurationSec,
             width: width,
             height: height
         )
