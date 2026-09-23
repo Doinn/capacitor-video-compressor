@@ -2,7 +2,7 @@
 
 Native video compression plugin for Capacitor v7. Compresses videos before upload using hardware acceleration on both iOS and Android.
 
-- **iOS**: AVAssetExportSession with `fileLengthLimit` bitrate control
+- **iOS**: AVAssetExportSession with quality presets
 - **Android**: MediaCodec Surface-to-Surface pipeline with OpenGL ES intermediary (~30MB peak memory)
 - **Web**: Returns `null` — no compression available
 
@@ -55,8 +55,8 @@ await listener.remove();
 | `quality` | `'low' \| 'medium' \| 'high'` | `'medium'` | Quality preset |
 | `maxWidth` | `number` | from preset | Override max output width for landscape video (on Android the larger bound limits the long edge, so portrait video is bounded the same way) |
 | `maxHeight` | `number` | from preset | Override max output height for landscape video |
-| `videoBitrate` | `number` | from preset | Override video bitrate (bps) |
-| `audioBitrate` | `number` | from preset | Override audio bitrate (bps) |
+| `videoBitrate` | `number` | from preset | Override video bitrate (bps), Android only |
+| `audioBitrate` | `number` | from preset | Override audio bitrate (bps), Android only |
 | `deleteOriginal` | `boolean` | `false` | Delete source file after compression |
 | `maxDuration` | `number` | `undefined` | Trim video to N seconds (iOS only) |
 
@@ -111,7 +111,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed platform implement
 
 ### iOS
 - Uses `AVAssetExportSession` — Apple handles codec selection internally
-- `fileLengthLimit` controls output size (advisory, may be slightly exceeded)
+- Output size follows the export preset; `videoBitrate`/`audioBitrate` are ignored
+- Output shorter than the source fails the call instead of returning a cut video
 - Minimum iOS 14.0
 
 ### Android
