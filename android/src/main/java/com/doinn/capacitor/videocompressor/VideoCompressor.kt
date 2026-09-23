@@ -816,42 +816,58 @@ class VideoCompressor(private val context: Context) {
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
             vertices.put(QUAD).position(0)
 
-            // ── EGL ──
-            eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-            check(eglDisplay != EGL14.EGL_NO_DISPLAY) { "No EGL display" }
-            val ver = IntArray(2)
-            check(EGL14.eglInitialize(eglDisplay, ver, 0, ver, 1)) { "eglInitialize failed" }
+            // Built in locals so a failure at any step can destroy what was
+            // already created; the caller never gets a renderer to close.
+            var display = EGL14.EGL_NO_DISPLAY
+            var context = EGL14.EGL_NO_CONTEXT
+            var surface = EGL14.EGL_NO_SURFACE
+            val prog: Int
+            val tex = IntArray(1)
+            try {
+                // ── EGL ──
+                display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                check(display != EGL14.EGL_NO_DISPLAY) { "No EGL display" }
+                val ver = IntArray(2)
+                check(EGL14.eglInitialize(display, ver, 0, ver, 1)) { "eglInitialize failed" }
 
-            val cfgAttr = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE
-            )
-            val cfgs = arrayOfNulls<android.opengl.EGLConfig>(1)
-            val nCfg = IntArray(1)
-            check(EGL14.eglChooseConfig(eglDisplay, cfgAttr, 0, cfgs, 0, 1, nCfg, 0))
+                val cfgAttr = intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE
+                )
+                val cfgs = arrayOfNulls<android.opengl.EGLConfig>(1)
+                val nCfg = IntArray(1)
+                check(EGL14.eglChooseConfig(display, cfgAttr, 0, cfgs, 0, 1, nCfg, 0))
 
-            eglContext = EGL14.eglCreateContext(
-                eglDisplay, cfgs[0]!!, EGL14.EGL_NO_CONTEXT,
-                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
-            )
-            check(eglContext != EGL14.EGL_NO_CONTEXT) { "eglCreateContext failed" }
+                context = EGL14.eglCreateContext(
+                    display, cfgs[0]!!, EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
+                )
+                check(context != EGL14.EGL_NO_CONTEXT) { "eglCreateContext failed" }
 
-            eglSurface = EGL14.eglCreateWindowSurface(
-                eglDisplay, cfgs[0]!!, outputSurface, intArrayOf(EGL14.EGL_NONE), 0
-            )
-            check(eglSurface != EGL14.EGL_NO_SURFACE) { "eglCreateWindowSurface failed" }
-            check(EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext))
+                surface = EGL14.eglCreateWindowSurface(
+                    display, cfgs[0]!!, outputSurface, intArrayOf(EGL14.EGL_NONE), 0
+                )
+                check(surface != EGL14.EGL_NO_SURFACE) { "eglCreateWindowSurface failed" }
+                check(EGL14.eglMakeCurrent(display, surface, surface, context))
 
-            // ── GLES ──
-            program = buildProgram(VS, FS)
+                // ── GLES ──
+                prog = buildProgram(VS, FS)
+                GLES20.glGenTextures(1, tex, 0)
+            } catch (e: Throwable) {
+                destroyEgl(display, context, surface)
+                throw e
+            }
+
+            eglDisplay = display
+            eglContext = context
+            eglSurface = surface
+            program = prog
             aPositionLoc = GLES20.glGetAttribLocation(program, "aPosition")
             aTexCoordLoc = GLES20.glGetAttribLocation(program, "aTexCoord")
             uSTMatrixLoc = GLES20.glGetUniformLocation(program, "uSTMatrix")
 
-            val tex = IntArray(1)
-            GLES20.glGenTextures(1, tex, 0)
             textureId = tex[0]
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -888,10 +904,20 @@ class VideoCompressor(private val context: Context) {
         override fun close() {
             GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
             GLES20.glDeleteProgram(program)
-            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            EGL14.eglDestroySurface(eglDisplay, eglSurface)
-            EGL14.eglDestroyContext(eglDisplay, eglContext)
-            EGL14.eglTerminate(eglDisplay)
+            destroyEgl(eglDisplay, eglContext, eglSurface)
+        }
+
+        /** Releases whichever EGL objects were created; the no-object sentinels are skipped. */
+        private fun destroyEgl(
+            display: android.opengl.EGLDisplay,
+            context: android.opengl.EGLContext,
+            surface: android.opengl.EGLSurface
+        ) {
+            if (display == EGL14.EGL_NO_DISPLAY) return
+            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
+            if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
+            EGL14.eglTerminate(display)
         }
 
         private fun buildProgram(vs: String, fs: String): Int {
