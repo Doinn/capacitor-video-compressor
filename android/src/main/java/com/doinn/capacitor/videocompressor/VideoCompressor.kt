@@ -136,6 +136,25 @@ class VideoCompressor(private val context: Context) {
             extractor.selectTrack(videoTrackIndex)
             val inputFormat = extractor.getTrackFormat(videoTrackIndex)
 
+            // Resolved before creating the encoder so an unsupported track fails
+            // without leaking an already-started codec.
+            val trackMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
+            val trackProfile = if (inputFormat.containsKey(MediaFormat.KEY_PROFILE)) {
+                inputFormat.getInteger(MediaFormat.KEY_PROFILE)
+            } else {
+                null
+            }
+            val decoderMime = DecoderMime.resolve(trackMime, trackProfile)
+                ?: throw CompressionException("Unsupported video codec: $trackMime (profile=$trackProfile)")
+            if (decoderMime != trackMime) {
+                Log.d(TAG, "Decoding $trackMime (profile=$trackProfile) base layer as $decoderMime")
+                inputFormat.setString(MediaFormat.KEY_MIME, decoderMime)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    inputFormat.removeKey(MediaFormat.KEY_PROFILE)
+                    inputFormat.removeKey(MediaFormat.KEY_LEVEL)
+                }
+            }
+
             val inputWidth = inputFormat.getInteger(MediaFormat.KEY_WIDTH)
             val inputHeight = inputFormat.getInteger(MediaFormat.KEY_HEIGHT)
             val rotation = getRotation(inputFormat)
@@ -187,7 +206,6 @@ class VideoCompressor(private val context: Context) {
             )
 
             // Configure decoder → outputs to SurfaceTexture (not directly to encoder)
-            val decoderMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
             val decoder = MediaCodec.createDecoderByType(decoderMime)
             decoder.configure(inputFormat, decoderOutputSurface, null, 0)
             decoder.start()
