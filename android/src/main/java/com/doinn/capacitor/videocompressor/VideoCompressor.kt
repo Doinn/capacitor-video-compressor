@@ -159,7 +159,7 @@ class VideoCompressor(private val context: Context) {
             val inputHeight = inputFormat.getInteger(MediaFormat.KEY_HEIGHT)
             val rotation = getRotation(inputFormat)
 
-            val (outputWidth, outputHeight) = calculateOutputDimensions(
+            val (outputWidth, outputHeight) = OutputDimensions.calculate(
                 inputWidth, inputHeight, rotation, options.maxWidth, options.maxHeight
             )
 
@@ -673,54 +673,6 @@ class VideoCompressor(private val context: Context) {
         } catch (e: Exception) {
             0
         }
-    }
-
-    /**
-     * Calculate output dimensions maintaining aspect ratio.
-     *
-     * Dimensions are in display space. For rotated videos (rotation=90/270),
-     * we swap the input dimensions so that the constraints are applied in
-     * the display orientation. The SurfaceTexture transform matrix handles
-     * rotation during GLES rendering.
-     *
-     * Always rounds to multiples of 16 for hardware encoder compatibility.
-     */
-    private fun calculateOutputDimensions(
-        inputWidth: Int,
-        inputHeight: Int,
-        rotation: Int,
-        maxWidth: Int,
-        maxHeight: Int
-    ): Pair<Int, Int> {
-        val (displayW, displayH) = if (rotation == 90 || rotation == 270) {
-            inputHeight to inputWidth
-        } else {
-            inputWidth to inputHeight
-        }
-
-        // If already within bounds, keep original size
-        if (displayW <= maxWidth && displayH <= maxHeight) {
-            return Pair(roundTo16(displayW), roundTo16(displayH))
-        }
-
-        // Scale down maintaining aspect ratio
-        val widthRatio = maxWidth.toFloat() / displayW
-        val heightRatio = maxHeight.toFloat() / displayH
-        val scale = minOf(widthRatio, heightRatio)
-
-        val outW = roundTo16((displayW * scale).toInt())
-        val outH = roundTo16((displayH * scale).toInt())
-
-        return Pair(outW, outH)
-    }
-
-    /**
-     * Round to nearest multiple of 16 (minimum 16).
-     * Many hardware H.264 encoders on low-end devices require 16-aligned dimensions.
-     */
-    private fun roundTo16(value: Int): Int {
-        val rounded = (value + 8) / 16 * 16
-        return maxOf(rounded, 16)
     }
 
     /**
