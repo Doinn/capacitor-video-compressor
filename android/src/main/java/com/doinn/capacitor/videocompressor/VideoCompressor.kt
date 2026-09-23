@@ -139,8 +139,7 @@ class VideoCompressor(private val context: Context) {
             extractor.selectTrack(videoTrackIndex)
             val inputFormat = extractor.getTrackFormat(videoTrackIndex)
 
-            // Resolved before creating the encoder so an unsupported track fails
-            // without leaking an already-started codec.
+            // Resolved before creating any codec so an unsupported track fails fast.
             val trackMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
             val trackProfile = if (inputFormat.containsKey(MediaFormat.KEY_PROFILE)) {
                 inputFormat.getInteger(MediaFormat.KEY_PROFILE)
@@ -187,44 +186,53 @@ class VideoCompressor(private val context: Context) {
                 }
             }
 
-            val encoder = MediaCodec.createEncoderByType(MIME_AVC)
-            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            val encoderInputSurface = encoder.createInputSurface()
-            encoder.start()
-
-            // OpenGL intermediary: decoder → SurfaceTexture → GLES → encoder Surface.
-            // Direct Surface-to-Surface doesn't work on some low-end SoCs (Galaxy A03)
-            // because the encoder never consumes frames from its input Surface.
-            val renderer = TextureRenderer(encoderInputSurface, outputWidth, outputHeight)
-            val surfaceTexture = SurfaceTexture(renderer.textureId)
-            surfaceTexture.setDefaultBufferSize(inputWidth, inputHeight)
-            val decoderOutputSurface = Surface(surfaceTexture)
-
-            // Frame-available synchronization
-            val frameLock = Object()
-            var frameAvailable = false
-            surfaceTexture.setOnFrameAvailableListener(
-                { synchronized(frameLock) { frameAvailable = true; frameLock.notifyAll() } },
-                Handler(Looper.getMainLooper())
-            )
-
-            // Configure decoder → outputs to SurfaceTexture (not directly to encoder)
-            val decoder = MediaCodec.createDecoderByType(decoderMime)
-            decoder.configure(inputFormat, decoderOutputSurface, null, 0)
-            decoder.start()
-
+            // Created inside the try so a failure at any step (for example a device
+            // without a Main10 HEVC or AV1 decoder) still releases what was started.
+            var encoderRef: MediaCodec? = null
+            var encoderInputSurfaceRef: Surface? = null
+            var rendererRef: TextureRenderer? = null
+            var surfaceTextureRef: SurfaceTexture? = null
+            var decoderOutputSurfaceRef: Surface? = null
+            var decoderRef: MediaCodec? = null
             var muxerTrack = -1
-            val decInfo = MediaCodec.BufferInfo()
-            val encInfo = MediaCodec.BufferInfo()
-            var inputDone = false
-            var decoderDone = false
-            var encoderDone = false
-            var lastProgressTime = 0L
-            var framesRendered = 0
-            var framesMuxed = 0
-            var lastVideoTimestampUs = -1L
 
             try {
+                val encoder = MediaCodec.createEncoderByType(MIME_AVC).also { encoderRef = it }
+                encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                val encoderInputSurface = encoder.createInputSurface().also { encoderInputSurfaceRef = it }
+                encoder.start()
+
+                // OpenGL intermediary: decoder → SurfaceTexture → GLES → encoder Surface.
+                // Direct Surface-to-Surface doesn't work on some low-end SoCs (Galaxy A03)
+                // because the encoder never consumes frames from its input Surface.
+                val renderer = TextureRenderer(encoderInputSurface, outputWidth, outputHeight).also { rendererRef = it }
+                val surfaceTexture = SurfaceTexture(renderer.textureId).also { surfaceTextureRef = it }
+                surfaceTexture.setDefaultBufferSize(inputWidth, inputHeight)
+                val decoderOutputSurface = Surface(surfaceTexture).also { decoderOutputSurfaceRef = it }
+
+                // Frame-available synchronization
+                val frameLock = Object()
+                var frameAvailable = false
+                surfaceTexture.setOnFrameAvailableListener(
+                    { synchronized(frameLock) { frameAvailable = true; frameLock.notifyAll() } },
+                    Handler(Looper.getMainLooper())
+                )
+
+                // Configure decoder → outputs to SurfaceTexture (not directly to encoder)
+                val decoder = MediaCodec.createDecoderByType(decoderMime).also { decoderRef = it }
+                decoder.configure(inputFormat, decoderOutputSurface, null, 0)
+                decoder.start()
+
+                val decInfo = MediaCodec.BufferInfo()
+                val encInfo = MediaCodec.BufferInfo()
+                var inputDone = false
+                var decoderDone = false
+                var encoderDone = false
+                var lastProgressTime = 0L
+                var framesRendered = 0
+                var framesMuxed = 0
+                var lastVideoTimestampUs = -1L
+
                 while (!encoderDone) {
                     if (isCancelled) throw CancelledException()
 
@@ -325,14 +333,14 @@ class VideoCompressor(private val context: Context) {
                 // Release each resource independently — if one throws (common on
                 // devices where a codec errored), the others still get cleaned up.
                 // Leaking a hardware codec instance is fatal on most devices (only 2-4 slots).
-                tryQuietly { decoder.stop() }
-                tryQuietly { decoder.release() }
-                tryQuietly { encoder.stop() }
-                tryQuietly { encoder.release() }
-                tryQuietly { decoderOutputSurface.release() }
-                tryQuietly { surfaceTexture.release() }
-                tryQuietly { renderer.close() }
-                tryQuietly { encoderInputSurface.release() }
+                tryQuietly { decoderRef?.stop() }
+                tryQuietly { decoderRef?.release() }
+                tryQuietly { encoderRef?.stop() }
+                tryQuietly { encoderRef?.release() }
+                tryQuietly { decoderOutputSurfaceRef?.release() }
+                tryQuietly { surfaceTextureRef?.release() }
+                tryQuietly { rendererRef?.close() }
+                tryQuietly { encoderInputSurfaceRef?.release() }
             }
 
             return TrackResult(muxerTrack)
