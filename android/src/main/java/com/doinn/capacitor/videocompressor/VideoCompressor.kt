@@ -219,8 +219,18 @@ class VideoCompressor(private val context: Context) {
                 )
 
                 // Configure decoder → outputs to SurfaceTexture (not directly to encoder)
+                val colorTransfer = inputFormat.getIntegerSafe(MediaFormat.KEY_COLOR_TRANSFER, -1).takeIf { it >= 0 }
+                val requestSdr = ToneMapping.shouldRequestSdr(Build.VERSION.SDK_INT, colorTransfer)
+                if (requestSdr) {
+                    inputFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                }
                 val decoder = MediaCodec.createDecoderByType(decoderMime).also { decoderRef = it }
                 decoder.configure(inputFormat, decoderOutputSurface, null, 0)
+                if (requestSdr) {
+                    val granted = decoder.inputFormat.getIntegerSafe(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, 0) ==
+                        MediaFormat.COLOR_TRANSFER_SDR_VIDEO
+                    Log.d(TAG, "HDR input (transfer=$colorTransfer), decoder SDR tone mapping ${if (granted) "enabled" else "unsupported"}")
+                }
                 decoder.start()
 
                 val decInfo = MediaCodec.BufferInfo()
