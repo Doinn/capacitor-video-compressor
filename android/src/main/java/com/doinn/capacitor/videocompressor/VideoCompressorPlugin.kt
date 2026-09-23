@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 @CapacitorPlugin(name = "VideoCompressor")
@@ -51,6 +52,10 @@ class VideoCompressorPlugin : Plugin() {
 
     @PluginMethod
     fun compressVideo(call: PluginCall) {
+        if (!scope.isActive) {
+            call.reject("Plugin was destroyed", "UNAVAILABLE")
+            return
+        }
         val filePath = call.getString("filePath")
         if (filePath.isNullOrEmpty()) {
             call.reject("filePath is required", "INVALID_ARGUMENT")
