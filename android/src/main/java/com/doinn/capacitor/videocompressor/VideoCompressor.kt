@@ -59,7 +59,10 @@ class VideoCompressor(private val context: Context) {
 
             val inputFile = resolveInputFile(inputPath)
             val originalSize = getFileSize(inputPath)
-            val outputFile = File(context.cacheDir, "compressed_${System.currentTimeMillis()}.mp4")
+            val outputFile = File(
+                context.cacheDir,
+                "${CompressedCacheCleaner.FILE_PREFIX}${System.currentTimeMillis()}${CompressedCacheCleaner.FILE_SUFFIX}"
+            )
 
             Log.d(TAG, "Starting compression: $inputPath -> ${outputFile.absolutePath}")
             Log.d(TAG, "Options: ${options.maxWidth}x${options.maxHeight}, video=${options.videoBitrate}bps, audio=${options.audioBitrate}bps")
@@ -136,11 +139,29 @@ class VideoCompressor(private val context: Context) {
             extractor.selectTrack(videoTrackIndex)
             val inputFormat = extractor.getTrackFormat(videoTrackIndex)
 
+            // Resolved before creating any codec so an unsupported track fails fast.
+            val trackMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
+            val trackProfile = if (inputFormat.containsKey(MediaFormat.KEY_PROFILE)) {
+                inputFormat.getInteger(MediaFormat.KEY_PROFILE)
+            } else {
+                null
+            }
+            val decoderMime = DecoderMime.resolve(trackMime, trackProfile)
+                ?: throw CompressionException("Unsupported video codec: $trackMime (profile=$trackProfile)")
+            if (decoderMime != trackMime) {
+                Log.d(TAG, "Decoding $trackMime (profile=$trackProfile) base layer as $decoderMime")
+                inputFormat.setString(MediaFormat.KEY_MIME, decoderMime)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    inputFormat.removeKey(MediaFormat.KEY_PROFILE)
+                    inputFormat.removeKey(MediaFormat.KEY_LEVEL)
+                }
+            }
+
             val inputWidth = inputFormat.getInteger(MediaFormat.KEY_WIDTH)
             val inputHeight = inputFormat.getInteger(MediaFormat.KEY_HEIGHT)
             val rotation = getRotation(inputFormat)
 
-            val (outputWidth, outputHeight) = calculateOutputDimensions(
+            val (outputWidth, outputHeight) = OutputDimensions.calculate(
                 inputWidth, inputHeight, rotation, options.maxWidth, options.maxHeight
             )
 
@@ -165,45 +186,63 @@ class VideoCompressor(private val context: Context) {
                 }
             }
 
-            val encoder = MediaCodec.createEncoderByType(MIME_AVC)
-            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            val encoderInputSurface = encoder.createInputSurface()
-            encoder.start()
-
-            // OpenGL intermediary: decoder → SurfaceTexture → GLES → encoder Surface.
-            // Direct Surface-to-Surface doesn't work on some low-end SoCs (Galaxy A03)
-            // because the encoder never consumes frames from its input Surface.
-            val renderer = TextureRenderer(encoderInputSurface, outputWidth, outputHeight)
-            val surfaceTexture = SurfaceTexture(renderer.textureId)
-            surfaceTexture.setDefaultBufferSize(inputWidth, inputHeight)
-            val decoderOutputSurface = Surface(surfaceTexture)
-
-            // Frame-available synchronization
-            val frameLock = Object()
-            var frameAvailable = false
-            surfaceTexture.setOnFrameAvailableListener(
-                { synchronized(frameLock) { frameAvailable = true; frameLock.notifyAll() } },
-                Handler(Looper.getMainLooper())
-            )
-
-            // Configure decoder → outputs to SurfaceTexture (not directly to encoder)
-            val decoderMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
-            val decoder = MediaCodec.createDecoderByType(decoderMime)
-            decoder.configure(inputFormat, decoderOutputSurface, null, 0)
-            decoder.start()
-
+            // Created inside the try so a failure at any step (for example a device
+            // without a Main10 HEVC or AV1 decoder) still releases what was started.
+            var encoderRef: MediaCodec? = null
+            var encoderInputSurfaceRef: Surface? = null
+            var rendererRef: TextureRenderer? = null
+            var surfaceTextureRef: SurfaceTexture? = null
+            var decoderOutputSurfaceRef: Surface? = null
+            var decoderRef: MediaCodec? = null
             var muxerTrack = -1
-            val decInfo = MediaCodec.BufferInfo()
-            val encInfo = MediaCodec.BufferInfo()
-            var inputDone = false
-            var decoderDone = false
-            var encoderDone = false
-            var lastProgressTime = 0L
-            var framesRendered = 0
-            var framesMuxed = 0
-            var lastVideoTimestampUs = -1L
 
             try {
+                val encoder = MediaCodec.createEncoderByType(MIME_AVC).also { encoderRef = it }
+                encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                val encoderInputSurface = encoder.createInputSurface().also { encoderInputSurfaceRef = it }
+                encoder.start()
+
+                // OpenGL intermediary: decoder → SurfaceTexture → GLES → encoder Surface.
+                // Direct Surface-to-Surface doesn't work on some low-end SoCs (Galaxy A03)
+                // because the encoder never consumes frames from its input Surface.
+                val renderer = TextureRenderer(encoderInputSurface, outputWidth, outputHeight).also { rendererRef = it }
+                val surfaceTexture = SurfaceTexture(renderer.textureId).also { surfaceTextureRef = it }
+                surfaceTexture.setDefaultBufferSize(inputWidth, inputHeight)
+                val decoderOutputSurface = Surface(surfaceTexture).also { decoderOutputSurfaceRef = it }
+
+                // Frame-available synchronization
+                val frameLock = Object()
+                var frameAvailable = false
+                surfaceTexture.setOnFrameAvailableListener(
+                    { synchronized(frameLock) { frameAvailable = true; frameLock.notifyAll() } },
+                    Handler(Looper.getMainLooper())
+                )
+
+                // Configure decoder → outputs to SurfaceTexture (not directly to encoder)
+                val colorTransfer = inputFormat.getIntegerSafe(MediaFormat.KEY_COLOR_TRANSFER, -1).takeIf { it >= 0 }
+                val requestSdr = ToneMapping.shouldRequestSdr(Build.VERSION.SDK_INT, colorTransfer)
+                if (requestSdr) {
+                    inputFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                }
+                val decoder = MediaCodec.createDecoderByType(decoderMime).also { decoderRef = it }
+                decoder.configure(inputFormat, decoderOutputSurface, null, 0)
+                if (requestSdr) {
+                    val granted = decoder.inputFormat.getIntegerSafe(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, 0) ==
+                        MediaFormat.COLOR_TRANSFER_SDR_VIDEO
+                    Log.d(TAG, "HDR input (transfer=$colorTransfer), decoder SDR tone mapping ${if (granted) "enabled" else "unsupported"}")
+                }
+                decoder.start()
+
+                val decInfo = MediaCodec.BufferInfo()
+                val encInfo = MediaCodec.BufferInfo()
+                var inputDone = false
+                var decoderDone = false
+                var encoderDone = false
+                var lastProgressTime = 0L
+                var framesRendered = 0
+                var framesMuxed = 0
+                var lastVideoTimestampUs = -1L
+
                 while (!encoderDone) {
                     if (isCancelled) throw CancelledException()
 
@@ -304,14 +343,14 @@ class VideoCompressor(private val context: Context) {
                 // Release each resource independently — if one throws (common on
                 // devices where a codec errored), the others still get cleaned up.
                 // Leaking a hardware codec instance is fatal on most devices (only 2-4 slots).
-                tryQuietly { decoder.stop() }
-                tryQuietly { decoder.release() }
-                tryQuietly { encoder.stop() }
-                tryQuietly { encoder.release() }
-                tryQuietly { decoderOutputSurface.release() }
-                tryQuietly { surfaceTexture.release() }
-                tryQuietly { renderer.close() }
-                tryQuietly { encoderInputSurface.release() }
+                tryQuietly { decoderRef?.stop() }
+                tryQuietly { decoderRef?.release() }
+                tryQuietly { encoderRef?.stop() }
+                tryQuietly { encoderRef?.release() }
+                tryQuietly { decoderOutputSurfaceRef?.release() }
+                tryQuietly { surfaceTextureRef?.release() }
+                tryQuietly { rendererRef?.close() }
+                tryQuietly { encoderInputSurfaceRef?.release() }
             }
 
             return TrackResult(muxerTrack)
@@ -421,15 +460,10 @@ class VideoCompressor(private val context: Context) {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
         }
 
-        val encoder = MediaCodec.createEncoderByType(MIME_AAC)
-        encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        encoder.start()
-
-        // Configure decoder
-        val decoderMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
-        val decoder = MediaCodec.createDecoderByType(decoderMime)
-        decoder.configure(inputFormat, null, null, 0)
-        decoder.start()
+        // Created inside the try so a failed decoder setup still releases the
+        // already-started encoder.
+        var encoderRef: MediaCodec? = null
+        var decoderRef: MediaCodec? = null
 
         var muxerTrack = -1
         val bufferInfo = MediaCodec.BufferInfo()
@@ -441,6 +475,16 @@ class VideoCompressor(private val context: Context) {
         var lastAudioTimestampUs = -1L
 
         try {
+            val encoder = MediaCodec.createEncoderByType(MIME_AAC).also { encoderRef = it }
+            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoder.start()
+
+            // Configure decoder
+            val decoderMime = inputFormat.getString(MediaFormat.KEY_MIME)!!
+            val decoder = MediaCodec.createDecoderByType(decoderMime).also { decoderRef = it }
+            decoder.configure(inputFormat, null, null, 0)
+            decoder.start()
+
             while (!encoderDone) {
                 if (isCancelled) throw CancelledException()
 
@@ -557,10 +601,10 @@ class VideoCompressor(private val context: Context) {
                 }
             }
         } finally {
-            tryQuietly { decoder.stop() }
-            tryQuietly { decoder.release() }
-            tryQuietly { encoder.stop() }
-            tryQuietly { encoder.release() }
+            tryQuietly { decoderRef?.stop() }
+            tryQuietly { decoderRef?.release() }
+            tryQuietly { encoderRef?.stop() }
+            tryQuietly { encoderRef?.release() }
         }
 
         onProgress?.invoke(1.0f)
@@ -655,54 +699,6 @@ class VideoCompressor(private val context: Context) {
         } catch (e: Exception) {
             0
         }
-    }
-
-    /**
-     * Calculate output dimensions maintaining aspect ratio.
-     *
-     * Dimensions are in display space. For rotated videos (rotation=90/270),
-     * we swap the input dimensions so that the constraints are applied in
-     * the display orientation. The SurfaceTexture transform matrix handles
-     * rotation during GLES rendering.
-     *
-     * Always rounds to multiples of 16 for hardware encoder compatibility.
-     */
-    private fun calculateOutputDimensions(
-        inputWidth: Int,
-        inputHeight: Int,
-        rotation: Int,
-        maxWidth: Int,
-        maxHeight: Int
-    ): Pair<Int, Int> {
-        val (displayW, displayH) = if (rotation == 90 || rotation == 270) {
-            inputHeight to inputWidth
-        } else {
-            inputWidth to inputHeight
-        }
-
-        // If already within bounds, keep original size
-        if (displayW <= maxWidth && displayH <= maxHeight) {
-            return Pair(roundTo16(displayW), roundTo16(displayH))
-        }
-
-        // Scale down maintaining aspect ratio
-        val widthRatio = maxWidth.toFloat() / displayW
-        val heightRatio = maxHeight.toFloat() / displayH
-        val scale = minOf(widthRatio, heightRatio)
-
-        val outW = roundTo16((displayW * scale).toInt())
-        val outH = roundTo16((displayH * scale).toInt())
-
-        return Pair(outW, outH)
-    }
-
-    /**
-     * Round to nearest multiple of 16 (minimum 16).
-     * Many hardware H.264 encoders on low-end devices require 16-aligned dimensions.
-     */
-    private fun roundTo16(value: Int): Int {
-        val rounded = (value + 8) / 16 * 16
-        return maxOf(rounded, 16)
     }
 
     /**
@@ -820,42 +816,58 @@ class VideoCompressor(private val context: Context) {
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
             vertices.put(QUAD).position(0)
 
-            // ── EGL ──
-            eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-            check(eglDisplay != EGL14.EGL_NO_DISPLAY) { "No EGL display" }
-            val ver = IntArray(2)
-            check(EGL14.eglInitialize(eglDisplay, ver, 0, ver, 1)) { "eglInitialize failed" }
+            // Built in locals so a failure at any step can destroy what was
+            // already created; the caller never gets a renderer to close.
+            var display = EGL14.EGL_NO_DISPLAY
+            var context = EGL14.EGL_NO_CONTEXT
+            var surface = EGL14.EGL_NO_SURFACE
+            val prog: Int
+            val tex = IntArray(1)
+            try {
+                // ── EGL ──
+                display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+                check(display != EGL14.EGL_NO_DISPLAY) { "No EGL display" }
+                val ver = IntArray(2)
+                check(EGL14.eglInitialize(display, ver, 0, ver, 1)) { "eglInitialize failed" }
 
-            val cfgAttr = intArrayOf(
-                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE
-            )
-            val cfgs = arrayOfNulls<android.opengl.EGLConfig>(1)
-            val nCfg = IntArray(1)
-            check(EGL14.eglChooseConfig(eglDisplay, cfgAttr, 0, cfgs, 0, 1, nCfg, 0))
+                val cfgAttr = intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE
+                )
+                val cfgs = arrayOfNulls<android.opengl.EGLConfig>(1)
+                val nCfg = IntArray(1)
+                check(EGL14.eglChooseConfig(display, cfgAttr, 0, cfgs, 0, 1, nCfg, 0))
 
-            eglContext = EGL14.eglCreateContext(
-                eglDisplay, cfgs[0]!!, EGL14.EGL_NO_CONTEXT,
-                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
-            )
-            check(eglContext != EGL14.EGL_NO_CONTEXT) { "eglCreateContext failed" }
+                context = EGL14.eglCreateContext(
+                    display, cfgs[0]!!, EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
+                )
+                check(context != EGL14.EGL_NO_CONTEXT) { "eglCreateContext failed" }
 
-            eglSurface = EGL14.eglCreateWindowSurface(
-                eglDisplay, cfgs[0]!!, outputSurface, intArrayOf(EGL14.EGL_NONE), 0
-            )
-            check(eglSurface != EGL14.EGL_NO_SURFACE) { "eglCreateWindowSurface failed" }
-            check(EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext))
+                surface = EGL14.eglCreateWindowSurface(
+                    display, cfgs[0]!!, outputSurface, intArrayOf(EGL14.EGL_NONE), 0
+                )
+                check(surface != EGL14.EGL_NO_SURFACE) { "eglCreateWindowSurface failed" }
+                check(EGL14.eglMakeCurrent(display, surface, surface, context))
 
-            // ── GLES ──
-            program = buildProgram(VS, FS)
+                // ── GLES ──
+                prog = buildProgram(VS, FS)
+                GLES20.glGenTextures(1, tex, 0)
+            } catch (e: Throwable) {
+                destroyEgl(display, context, surface)
+                throw e
+            }
+
+            eglDisplay = display
+            eglContext = context
+            eglSurface = surface
+            program = prog
             aPositionLoc = GLES20.glGetAttribLocation(program, "aPosition")
             aTexCoordLoc = GLES20.glGetAttribLocation(program, "aTexCoord")
             uSTMatrixLoc = GLES20.glGetUniformLocation(program, "uSTMatrix")
 
-            val tex = IntArray(1)
-            GLES20.glGenTextures(1, tex, 0)
             textureId = tex[0]
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -892,10 +904,20 @@ class VideoCompressor(private val context: Context) {
         override fun close() {
             GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
             GLES20.glDeleteProgram(program)
-            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-            EGL14.eglDestroySurface(eglDisplay, eglSurface)
-            EGL14.eglDestroyContext(eglDisplay, eglContext)
-            EGL14.eglTerminate(eglDisplay)
+            destroyEgl(eglDisplay, eglContext, eglSurface)
+        }
+
+        /** Releases whichever EGL objects were created; the no-object sentinels are skipped. */
+        private fun destroyEgl(
+            display: android.opengl.EGLDisplay,
+            context: android.opengl.EGLContext,
+            surface: android.opengl.EGLSurface
+        ) {
+            if (display == EGL14.EGL_NO_DISPLAY) return
+            EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+            if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
+            if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
+            EGL14.eglTerminate(display)
         }
 
         private fun buildProgram(vs: String, fs: String): Int {

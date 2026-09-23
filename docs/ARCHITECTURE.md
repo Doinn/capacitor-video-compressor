@@ -94,12 +94,12 @@ Custom overrides are also supported via individual parameters: `maxWidth`, `maxH
 
 1. Loads the video asset with precise timing
 2. Selects export preset based on target resolution (`LowQuality`, `MediumQuality`, `HighestQuality`)
-3. Sets `fileLengthLimit` = `duration * (videoBitrate + audioBitrate) / 8 * 1.1` — this indirectly constrains the output bitrate
-4. Enables `shouldOptimizeForNetworkUse = true` (fast-start MOOV atom)
-5. Polls `session.progress` every 250ms on main RunLoop, emits via `notifyListeners`
-6. Output: compressed MP4 in `NSTemporaryDirectory()`
+3. Enables `shouldOptimizeForNetworkUse = true` (fast-start MOOV atom)
+4. Polls `session.progress` every 250ms on main RunLoop, emits via `notifyListeners`
+5. Output: compressed MP4 in `NSTemporaryDirectory()`
+6. Compares the output video track length with the source (or the `maxDuration` trim) and fails if it is shorter, so the caller uploads the original instead of a cut video
 
-**Important**: `AVAssetExportSession` doesn't expose direct bitrate control. We use `fileLengthLimit` (max file size in bytes) to achieve approximate bitrate targets.
+**Important**: `AVAssetExportSession` doesn't expose direct bitrate control, so output size follows the preset and `videoBitrate`/`audioBitrate` are ignored on iOS. `fileLengthLimit` is not used: it caps the file size, which can cut long videos short instead of lowering their bitrate.
 
 ---
 
@@ -214,10 +214,7 @@ AAC encoder (`OMX.google.aac.encoder`, software fallback) emits EOS buffer with 
 If `decoder.stop()` throws after a codec error, subsequent cleanup calls are skipped, leaking hardware codec instances. Each `stop()`/`release()` is wrapped in `tryQuietly` independently.
 
 ### iOS `fileLengthLimit`
-Advisory limit — actual output may slightly exceed it. Formula:
-```
-fileLengthLimit = duration * (videoBitrate + audioBitrate) / 8 * 1.1
-```
+Not used. It caps the output file size rather than the encoder bitrate, so long videos can be cut short. Output length is now verified after export instead.
 
 ### No web compression
 Returns `null` on web. Videos upload uncompressed on web platform.

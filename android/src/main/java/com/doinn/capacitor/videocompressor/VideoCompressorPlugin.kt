@@ -11,6 +11,8 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 @CapacitorPlugin(name = "VideoCompressor")
@@ -28,10 +30,32 @@ class VideoCompressorPlugin : Plugin() {
     override fun load() {
         compressor = VideoCompressor(context)
         Log.d(TAG, "VideoCompressorPlugin loaded")
+        purgeStaleCompressedFiles()
+    }
+
+    override fun handleOnDestroy() {
+        compressor?.cancel()
+        scope.cancel()
+        super.handleOnDestroy()
+    }
+
+    private fun purgeStaleCompressedFiles() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val deleted = CompressedCacheCleaner.purgeStale(context.cacheDir, System.currentTimeMillis())
+                if (deleted > 0) Log.d(TAG, "Deleted $deleted stale compressed file(s)")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to purge stale compressed files", e)
+            }
+        }
     }
 
     @PluginMethod
     fun compressVideo(call: PluginCall) {
+        if (!scope.isActive) {
+            call.reject("Plugin was destroyed", "UNAVAILABLE")
+            return
+        }
         val filePath = call.getString("filePath")
         if (filePath.isNullOrEmpty()) {
             call.reject("filePath is required", "INVALID_ARGUMENT")
