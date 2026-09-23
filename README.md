@@ -9,7 +9,7 @@ Native video compression plugin for Capacitor v7. Compresses videos before uploa
 ## Install
 
 ```bash
-yarn add "@doinn/capacitor-video-compressor@https://github.com/Doinn/capacitor-video-compressor.git#v1.0.0"
+yarn add "@doinn/capacitor-video-compressor@https://github.com/Doinn/capacitor-video-compressor.git#v1.0.1"
 
 npx cap sync
 ```
@@ -80,6 +80,8 @@ Cancels an in-progress compression.
 | **`medium`** | 1280x720 | 1.5 Mbps | 128 Kbps |
 | `high` | 1920x1080 | 3.0 Mbps | 192 Kbps |
 
+Resolution and bitrates apply on Android, where the bounds follow the video's orientation (portrait `low` → 480x848). On iOS the preset maps to `AVAssetExportPresetLowQuality` / `MediumQuality` / `HighestQuality` and Apple picks resolution and bitrate (an iPhone `medium` export came out at 568x320).
+
 ## Error Codes
 
 | Code | Meaning |
@@ -89,6 +91,7 @@ Cancels an in-progress compression.
 | `COMPRESSION_FAILED` | Generic compression failure |
 | `CANCELLED` | Cancelled via `cancelCompression()` |
 | `MISSING_PARAM` / `INVALID_ARGUMENT` | Required `filePath` missing |
+| `UNAVAILABLE` | Plugin was destroyed before the call (Android) |
 
 ## Development
 
@@ -118,7 +121,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed platform implement
 ### Android
 - MediaCodec Surface-to-Surface pipeline with OpenGL intermediary
 - Hardened for: Huawei Kirin (EOS timestamp bugs), Samsung Galaxy A03 (direct Surface broken), MediaTek (EOS signal retry)
-- 16-aligned output dimensions for hardware encoder compatibility
+- 16-aligned output dimensions for hardware encoder compatibility, never above the bounds
+- Dolby Vision input decodes its backward-compatible base layer (profiles 4/8 → HEVC, 9 → AVC, 10 → AV1); profiles without one (5, 7) fail so the caller can upload the original
+- HDR input asks the decoder for SDR tone mapping on API 31+; decoders without support ignore the request
+- Compressed files older than 24h are removed from the cache directory when the plugin loads
 - Sequential video→audio processing to respect hardware codec slot limits
 - Minimum API 23
 
