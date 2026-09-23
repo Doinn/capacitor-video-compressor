@@ -11,6 +11,7 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 @CapacitorPlugin(name = "VideoCompressor")
@@ -29,6 +30,12 @@ class VideoCompressorPlugin : Plugin() {
         compressor = VideoCompressor(context)
         Log.d(TAG, "VideoCompressorPlugin loaded")
         purgeStaleCompressedFiles()
+    }
+
+    override fun handleOnDestroy() {
+        compressor?.cancel()
+        scope.cancel()
+        super.handleOnDestroy()
     }
 
     private fun purgeStaleCompressedFiles() {
