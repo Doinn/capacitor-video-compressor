@@ -131,6 +131,9 @@ class VideoCompressor {
             print("\(logPrefix) Trimming video to \(String(format: "%.1f", maxDuration))s (original: \(String(format: "%.1f", CMTimeGetSeconds(duration)))s)")
         }
 
+        let sourceVideoSec = (try? await videoTrackDurationSeconds(asset: asset)) ?? durationSec
+        let expectedVideoSec = min(sourceVideoSec, durationSec)
+
         exportSession = session
         startProgressPolling(session: session)
 
@@ -158,13 +161,20 @@ class VideoCompressor {
             throw CompressionError.compressionFailed(errorMsg)
         }
 
-        // The export reports .completed even when it stops early, so compare the
-        // output length with the requested one and fail rather than upload a cut video.
-        let outputDurationSec = CMTimeGetSeconds(try await loadDuration(asset: AVURLAsset(url: outputURL)))
-        let tolerance = max(0.5, durationSec * 0.02)
-        if outputDurationSec < durationSec - tolerance {
+        // Defensive check: an export can end early without an error status, so
+        // compare video track lengths and fail rather than upload a cut video.
+        let outputDurationSec: Double
+        do {
+            let outputAsset = AVURLAsset(url: outputURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+            outputDurationSec = try await videoTrackDurationSeconds(asset: outputAsset)
+        } catch {
             try? FileManager.default.removeItem(at: outputURL)
-            let errorMsg = "Output truncated: \(String(format: "%.1f", outputDurationSec))s of \(String(format: "%.1f", durationSec))s"
+            throw CompressionError.compressionFailed("Could not read output duration: \(error.localizedDescription)")
+        }
+        let tolerance = max(0.5, expectedVideoSec * 0.02)
+        if outputDurationSec < expectedVideoSec - tolerance {
+            try? FileManager.default.removeItem(at: outputURL)
+            let errorMsg = "Output truncated: \(String(format: "%.1f", outputDurationSec))s of \(String(format: "%.1f", expectedVideoSec))s"
             print("\(logPrefix) \(errorMsg)")
             throw CompressionError.compressionFailed(errorMsg)
         }
@@ -220,6 +230,27 @@ class VideoCompressor {
         } else {
             return asset.duration
         }
+    }
+
+    /// Length in seconds of the first video track, which excludes audio that may run longer.
+    private func videoTrackDurationSeconds(asset: AVURLAsset) async throws -> Double {
+        let tracks: [AVAssetTrack]
+        if #available(iOS 15.0, *) {
+            tracks = try await asset.loadTracks(withMediaType: .video)
+        } else {
+            tracks = asset.tracks(withMediaType: .video)
+        }
+        guard let videoTrack = tracks.first else {
+            throw CompressionError.compressionFailed("No video track")
+        }
+
+        let timeRange: CMTimeRange
+        if #available(iOS 15.0, *) {
+            timeRange = try await videoTrack.load(.timeRange)
+        } else {
+            timeRange = videoTrack.timeRange
+        }
+        return CMTimeGetSeconds(timeRange.duration)
     }
 
     private func outputDimensions(asset: AVURLAsset) async -> (Int, Int) {
