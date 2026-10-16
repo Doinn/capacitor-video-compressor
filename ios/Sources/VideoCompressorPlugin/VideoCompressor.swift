@@ -144,8 +144,10 @@ class VideoCompressor {
         }
         defer {
             withStateLock {
-                exportSession = nil
-                exportTask = nil
+                if exportSession === session {
+                    exportSession = nil
+                    exportTask = nil
+                }
             }
         }
         if cancelledBeforeExport {
@@ -236,7 +238,9 @@ class VideoCompressor {
     @available(iOS 18.0, *)
     private func exportToFile(session: AVAssetExportSession, outputURL: URL) async throws {
         let progressTask = Task { [weak self] in
+            // Cancellation is cooperative: stop before a late state overrides the final 1.0.
             for await state in session.states(updateInterval: 0.25) {
+                if Task.isCancelled { break }
                 if case .exporting(let progress) = state {
                     self?.onProgress?(Float(progress.fractionCompleted))
                 }
