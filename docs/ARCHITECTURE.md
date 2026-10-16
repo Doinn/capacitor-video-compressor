@@ -95,7 +95,7 @@ Custom overrides are also supported via individual parameters: `maxWidth`, `maxH
 1. Loads the video asset with precise timing
 2. Selects export preset based on target resolution (`LowQuality`, `MediumQuality`, `HighestQuality`)
 3. Enables `shouldOptimizeForNetworkUse = true` (fast-start MOOV atom)
-4. Polls `session.progress` every 250ms on main RunLoop, emits via `notifyListeners`
+4. Exports with `export(to:as:)` on iOS 18+, reading progress from `states(updateInterval:)` every 250ms; errors and cancellation arrive as thrown errors, so the session status is never read. Older iOS uses the deprecated `export()` and polls `session.progress` every 250ms on the main RunLoop. Progress is emitted via `notifyListeners`
 5. Output: compressed MP4 in `NSTemporaryDirectory()`
 6. Compares the output video track length with the source (or the `maxDuration` trim) and fails if it is shorter, so the caller uploads the original instead of a cut video
 
