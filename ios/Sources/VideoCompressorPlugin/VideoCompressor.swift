@@ -70,13 +70,19 @@ struct CompressionResult {
 }
 
 class VideoCompressor {
+    // cancel() arrives from the plugin bridge while compress() runs on another task.
+    private let stateLock = NSLock()
     private var exportSession: AVAssetExportSession?
+    private var exportTask: Task<Void, Error>?
+    private var cancelRequested = false
     private var progressTimer: Timer?
     var onProgress: ((Float) -> Void)?
 
     private let logPrefix = "[VideoCompressor]"
 
     func compress(inputPath: String, options: CompressionOptions) async throws -> CompressionResult {
+        withStateLock { cancelRequested = false }
+
         let fileURL: URL
         if inputPath.hasPrefix("file://") {
             guard let url = URL(string: inputPath) else {
@@ -115,8 +121,6 @@ class VideoCompressor {
             try? FileManager.default.removeItem(at: outputURL)
         }
 
-        session.outputURL = outputURL
-        session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true
 
         // Load source duration
@@ -134,32 +138,32 @@ class VideoCompressor {
         let sourceVideoSec = (try? await videoTrackDurationSeconds(asset: asset)) ?? durationSec
         let expectedVideoSec = min(sourceVideoSec, durationSec)
 
-        exportSession = session
-        startProgressPolling(session: session)
+        let cancelledBeforeExport = withStateLock { () -> Bool in
+            exportSession = session
+            return cancelRequested
+        }
+        defer {
+            withStateLock {
+                exportSession = nil
+                exportTask = nil
+            }
+        }
+        if cancelledBeforeExport {
+            throw CompressionError.cancelled
+        }
 
         print("\(logPrefix) Starting export...")
-        await session.export()
-        stopProgressPolling()
-
-        switch session.status {
-        case .completed:
-            print("\(logPrefix) Export completed successfully")
-        case .cancelled:
-            // Clean up partial output
+        do {
+            if #available(iOS 18.0, *) {
+                try await exportToFile(session: session, outputURL: outputURL)
+            } else {
+                try await exportLegacy(session: session, outputURL: outputURL)
+            }
+        } catch {
             try? FileManager.default.removeItem(at: outputURL)
-            throw CompressionError.cancelled
-        case .failed:
-            let errorMsg = session.error?.localizedDescription ?? "Unknown error"
-            print("\(logPrefix) Export failed: \(errorMsg)")
-            // Clean up partial output
-            try? FileManager.default.removeItem(at: outputURL)
-            throw CompressionError.compressionFailed(errorMsg)
-        default:
-            let errorMsg = "Unexpected export status: \(session.status.rawValue)"
-            print("\(logPrefix) \(errorMsg)")
-            try? FileManager.default.removeItem(at: outputURL)
-            throw CompressionError.compressionFailed(errorMsg)
+            throw error
         }
+        print("\(logPrefix) Export completed successfully")
 
         // Defensive check: an export can end early without an error status, so
         // compare video track lengths and fail rather than upload a cut video.
@@ -195,8 +199,6 @@ class VideoCompressor {
             print("\(logPrefix) Original file deleted")
         }
 
-        exportSession = nil
-
         return CompressionResult(
             compressedPath: outputURL.path,
             originalSize: originalSize,
@@ -209,10 +211,86 @@ class VideoCompressor {
 
     func cancel() {
         print("\(logPrefix) Cancel requested")
-        exportSession?.cancelExport()
+        let (session, task) = withStateLock { () -> (AVAssetExportSession?, Task<Void, Error>?) in
+            cancelRequested = true
+            return (exportSession, exportTask)
+        }
+        if let task = task {
+            task.cancel()
+        } else {
+            session?.cancelExport()
+        }
     }
 
     // MARK: - Private helpers
+
+    private func withStateLock<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    /// iOS 18+ export. Failures and cancellation arrive as thrown errors, so the
+    /// session status is never read; on iOS 26 the deprecated export() crashed
+    /// reading it inside exportAsynchronously (Sentry 3AZ).
+    @available(iOS 18.0, *)
+    private func exportToFile(session: AVAssetExportSession, outputURL: URL) async throws {
+        let progressTask = Task { [weak self] in
+            for await state in session.states(updateInterval: 0.25) {
+                if case .exporting(let progress) = state {
+                    self?.onProgress?(Float(progress.fractionCompleted))
+                }
+            }
+        }
+        defer {
+            progressTask.cancel()
+            onProgress?(1.0)
+        }
+
+        let task = Task {
+            try await session.export(to: outputURL, as: .mp4)
+        }
+        let cancelledBeforeStart = withStateLock { () -> Bool in
+            exportTask = task
+            return cancelRequested
+        }
+        if cancelledBeforeStart {
+            task.cancel()
+        }
+
+        do {
+            try await task.value
+        } catch {
+            if error is CancellationError || withStateLock({ cancelRequested }) {
+                throw CompressionError.cancelled
+            }
+            print("\(logPrefix) Export failed: \(error.localizedDescription)")
+            throw CompressionError.compressionFailed(error.localizedDescription)
+        }
+    }
+
+    private func exportLegacy(session: AVAssetExportSession, outputURL: URL) async throws {
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        startProgressPolling(session: session)
+        await session.export()
+        stopProgressPolling()
+
+        switch session.status {
+        case .completed:
+            return
+        case .cancelled:
+            throw CompressionError.cancelled
+        case .failed:
+            let errorMsg = session.error?.localizedDescription ?? "Unknown error"
+            print("\(logPrefix) Export failed: \(errorMsg)")
+            throw CompressionError.compressionFailed(errorMsg)
+        default:
+            let errorMsg = "Unexpected export status: \(session.status.rawValue)"
+            print("\(logPrefix) \(errorMsg)")
+            throw CompressionError.compressionFailed(errorMsg)
+        }
+    }
 
     private func exportPreset(for options: CompressionOptions) -> String {
         if options.maxHeight <= 480 {
